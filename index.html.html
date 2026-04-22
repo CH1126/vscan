@@ -1,0 +1,180 @@
+﻿<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>V-SCANNER PRO - Auto Save</title>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript" onload="onOpenCvReady()"></script>
+    <style>
+        :root { --primary: #FF6B00; --bg: #121212; }
+        body { font-family: sans-serif; background: var(--bg); color: #E0E0E0; margin: 0; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+        header { background: #000; padding: 15px; border-bottom: 2px solid var(--primary); text-align: center; font-weight: bold; position: sticky; top: 0; z-index: 100; }
+        .container { padding: 15px; max-width: 800px; margin: 0 auto; display: flex; flex-direction: column; gap: 15px; }
+        .canvas-container { position: relative; background: #000; border-radius: 8px; overflow: hidden; touch-action: none; min-height: 350px; display: flex; justify-content: center; align-items: center; border: 1px solid #333; }
+        canvas, img { max-width: 100%; height: auto; display: block; }
+        #cropSvg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; cursor: crosshair; }
+        #saveLayer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0; z-index: 20; display: none; }
+        #zoomGlass { position: absolute; width: 120px; height: 120px; border: 3px solid var(--primary); border-radius: 50%; overflow: hidden; display: none; z-index: 200; pointer-events: none; background: #000; box-shadow: 0 5px 15px rgba(0,0,0,0.5); }
+        #zoomCanvas { position: absolute; }
+        .hint { font-size: 12px; color: #888; text-align: center; line-height: 1.5; }
+        .btn-group { display: flex; gap: 10px; }
+        .btn { flex: 1; padding: 16px; border: none; border-radius: 6px; font-weight: bold; cursor: pointer; font-size: 14px; transition: 0.2s; -webkit-appearance: none; }
+        .btn-upload { background: #333; color: white; }
+        .btn-process { background: var(--primary); color: white; }
+        .result-area { display: none; margin-top: 10px; text-align: center; border-top: 1px solid #333; padding-top: 20px; padding-bottom: 100px; }
+        .res-label { color: #2ecc71; font-weight: bold; margin-bottom: 15px; display: block; font-size: 14px; }
+    </style>
+</head>
+<body>
+
+<header>V-SCANNER PRO</header>
+
+<div class="container">
+    <div id="zoomGlass"><canvas id="zoomCanvas"></canvas></div>
+    <div class="hint">定位完成後，點擊「執行並儲存」將自動下載掃描結果</div>
+    
+    <div class="canvas-container">
+        <canvas id="canvasIn"></canvas>
+        <svg id="cropSvg"></svg>
+    </div>
+
+    <div class="btn-group">
+        <input type="file" id="fileInput" accept="image/*" style="display:none">
+        <button class="btn btn-upload" onclick="document.getElementById('fileInput').click()">選取照片</button>
+        <button class="btn btn-process" id="runBtn" disabled onclick="processAndDownload()">執行並儲存</button>
+    </div>
+
+    <div class="result-area" id="resultArea">
+        <span class="res-label">✓ 已自動觸發下載，也可長按下方圖片儲存</span>
+        <div class="canvas-container" style="min-height: auto; border: 2px solid #2ecc71;">
+            <canvas id="canvasOut"></canvas>
+            <img id="saveLayer" alt="Result Image">
+        </div>
+    </div>
+</div>
+
+<script>
+let imgElement = new Image();
+let corners = [];
+let draggingIdx = -1;
+const mc = document.getElementById('canvasIn');
+const svg = document.getElementById('cropSvg');
+const zoomGlass = document.getElementById('zoomGlass');
+const zoomCanvas = document.getElementById('zoomCanvas');
+const zctx = zoomCanvas.getContext('2d');
+
+function onOpenCvReady() { document.getElementById('runBtn').disabled = false; }
+
+document.getElementById('fileInput').onchange = (e) => {
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => { imgElement.src = ev.target.result; };
+    reader.readAsDataURL(file);
+    document.getElementById('resultArea').style.display = 'none';
+};
+
+imgElement.onload = function() {
+    const scale = Math.min(1, 1200 / Math.max(imgElement.width, imgElement.height));
+    mc.width = imgElement.width * scale;
+    mc.height = imgElement.height * scale;
+    mc.getContext('2d').drawImage(imgElement, 0, 0, mc.width, mc.height);
+    const w = mc.width, h = mc.height;
+    corners = [{x:w*0.2,y:h*0.2}, {x:w*0.8,y:h*0.2}, {x:w*0.8,y:h*0.8}, {x:w*0.2,y:h*0.8}];
+    renderSvg();
+};
+
+function renderSvg() {
+    const pts = corners.map(p => `${p.x},${p.y}`).join(' ');
+    svg.setAttribute('viewBox', `0 0 ${mc.width} ${mc.height}`);
+    svg.innerHTML = `
+        <polygon points="${pts}" fill="rgba(255,107,0,0.1)" stroke="#FF6B00" stroke-width="2"/>
+        ${corners.map((p,i) => `
+            <circle cx="${p.x}" cy="${p.y}" r="35" fill="transparent" onmousedown="startDrag(event,${i})" ontouchstart="startDrag(event,${i})"/>
+            <circle cx="${p.x}" cy="${p.y}" r="8" fill="#FF6B00" pointer-events="none"/>
+        `).join('')}
+    `;
+}
+
+// 智慧點位跳轉
+svg.addEventListener('click', (e) => {
+    if (draggingIdx !== -1) return;
+    const rect = svg.getBoundingClientRect();
+    const clickX = (e.clientX - rect.left) * (mc.width / rect.width);
+    const clickY = (e.clientY - rect.top) * (mc.height / rect.height);
+    let minDist = Infinity, targetIdx = 0;
+    corners.forEach((p, i) => {
+        let d = Math.hypot(p.x - clickX, p.y - clickY);
+        if (d < minDist) { minDist = d; targetIdx = i; }
+    });
+    if (minDist > 40) { corners[targetIdx].x = clickX; corners[targetIdx].y = clickY; renderSvg(); }
+});
+
+function startDrag(e, i) {
+    e.preventDefault(); e.stopPropagation();
+    draggingIdx = i;
+    zoomGlass.style.display = 'block';
+    const move = (ev) => {
+        if(draggingIdx === -1) return;
+        const rect = svg.getBoundingClientRect();
+        const clientX = ev.touches ? ev.touches[0].clientX : ev.clientX;
+        const clientY = ev.touches ? ev.touches[0].clientY : ev.clientY;
+        const curX = (clientX - rect.left) * (mc.width / rect.width);
+        const curY = (clientY - rect.top) * (mc.height / rect.height);
+        corners[draggingIdx].x = Math.max(0, Math.min(mc.width, curX));
+        corners[draggingIdx].y = Math.max(0, Math.min(mc.height, curY));
+        updateMagnifier(clientX, clientY, corners[draggingIdx].x, corners[draggingIdx].y);
+        requestAnimationFrame(renderSvg);
+    };
+    const end = () => { draggingIdx = -1; zoomGlass.style.display = 'none'; };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('touchmove', move, { passive: false });
+    window.addEventListener('mouseup', end); window.addEventListener('touchend', end);
+}
+
+function updateMagnifier(screenX, screenY, imgX, imgY) {
+    zoomGlass.style.left = (screenX - 60) + 'px';
+    zoomGlass.style.top = (screenY - 140) + 'px';
+    const zSize = 100;
+    zoomCanvas.width = 200; zoomCanvas.height = 200;
+    zctx.drawImage(mc, imgX - zSize/2, imgY - zSize/2, zSize, zSize, 0, 0, 200, 200);
+    zctx.strokeStyle = '#FF6B00'; zctx.lineWidth = 2;
+    zctx.beginPath(); zctx.moveTo(100,0); zctx.lineTo(100,200); zctx.moveTo(0,100); zctx.lineTo(200,100); zctx.stroke();
+}
+
+// 核心功能：執行校正並下載
+function processAndDownload() {
+    let src = cv.imread('canvasIn');
+    let dst = new cv.Mat();
+    let sCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [corners[0].x,corners[0].y,corners[1].x,corners[1].y,corners[2].x,corners[2].y,corners[3].x,corners[3].y]);
+    
+    const w = Math.max(Math.hypot(corners[1].x-corners[0].x, corners[1].y-corners[0].y), Math.hypot(corners[2].x-corners[3].x, corners[2].y-corners[3].y));
+    const h = Math.max(Math.hypot(corners[3].x-corners[0].x, corners[3].y-corners[0].y), Math.hypot(corners[2].x-corners[1].x, corners[2].y-corners[1].y));
+    
+    let dCoords = cv.matFromArray(4, 1, cv.CV_32FC2, [0, 0, w, 0, w, h, 0, h]);
+    let M = cv.getPerspectiveTransform(sCoords, dCoords);
+    cv.warpPerspective(src, dst, M, new cv.Size(w, h), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+    cv.imshow('canvasOut', dst);
+    
+    const dataUrl = document.getElementById('canvasOut').toDataURL("image/png");
+    
+    // 1. 下載功能
+    const link = document.createElement('a');
+    link.download = `SCAN_${new Date().getTime()}.png`;
+    link.href = dataUrl;
+    link.click();
+
+    // 2. 顯示長按區域
+    const saveImg = document.getElementById('saveLayer');
+    saveImg.src = dataUrl;
+    saveImg.style.display = 'block';
+    
+    const resArea = document.getElementById('resultArea');
+    resArea.style.display = 'block';
+    resArea.scrollIntoView({ behavior: 'smooth' });
+
+    src.delete(); dst.delete(); M.delete(); sCoords.delete(); dCoords.delete();
+}
+</script>
+</body>
+</html>
